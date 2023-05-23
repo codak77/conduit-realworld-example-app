@@ -108,12 +108,12 @@
         vpc_subnet_id: "{{privsub1id}}"
       register: app01_out
 
-    - name: Creating postgresql db01
+    - name: Creating Mysql db01
       ec2:
         key_name: conduitkey
         region: "{{region}}"
         instance_type: t2.micro
-        image: "{{postgresql_ami}}"
+        image: "{{Mysql_ami}}"
         wait: yes
         wait_timeout: 300
         instance_tags:
