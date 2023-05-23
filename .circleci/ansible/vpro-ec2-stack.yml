@@ -1,0 +1,198 @@
+---
+- name: Setup conduit Stack
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    - name: Import VPC setup Variable
+      include_vars: vars/vpc-output_vars
+
+    - name: Import conduit setup Variable
+      include_vars: vars/conduit_stacksetup
+
+    - name: Create conduit ec2 key
+      ec2_key:
+        name: conduitkey
+        region: "{{region}}"
+      register: conduitkey_out
+
+    - name: Save private key into file loginkey_conduit.pem
+      copy:
+        content: "{{conduitkey_out.key.private_key}}"
+        dest: "./loginkey_conduit.pem"
+        mode: 0600
+      when: conduitkey_out.changed
+
+    - name: Create Securiry Group for Load Balancer
+      ec2_group:
+        name: conduitELB-sg
+        description: Allow port 80 from everywhere and all port within sg
+        region: "{{region}}"
+        vpc_id: "{{vpcid}}"
+        rules:
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+      register: conduitELBSG_out
+
+    - name: Create Securiry Group for conduit Stack
+      ec2_group:
+        name: conduitStack-sg
+        description: Allow port 22 from everywhere and all port within sg
+        region: "{{region}}"
+        vpc_id: "{{vpcid}}"
+        purge_rules: no
+        rules:
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            group_id: "{{conduitELBSG_out.group_id}}"
+
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            group_id: "{{BastionSGid}}"
+      register: conduitStackSG_out
+
+    - name: Update Security Group with its own sg id
+      ec2_group:
+        name: conduitStack-sg
+        description: Allow port 22 from everywhere and all port within sg
+        region: "{{region}}"
+        vpc_id: "{{vpcid}}"
+        purge_rules: no
+        rules:
+          - proto: all
+            group_id: "{{conduitStackSG_out.group_id}}"
+
+    - name: Creating Nginx web01
+      ec2:
+        key_name: conduitkey
+        region: "{{region}}"
+        instance_type: t2.micro
+        image: "{{nginx_ami}}"
+        wait: yes
+        wait_timeout: 300
+        instance_tags:
+          Name: "web01"
+          Project: conduit
+          Owner: DevOps Team
+        exact_count: 1
+        count_tag:
+          Name: "web01"
+          Project: conduit
+          Owner: DevOps Team
+        group_id: "{{conduitStackSG_out.group_id}}"
+        vpc_subnet_id: "{{privsub1id}}"
+      register: web01_out
+
+    - name: Creating express app01
+      ec2:
+        key_name: conduitkey
+        region: "{{region}}"
+        instance_type: t2.micro
+        image: "{{express_ami}}"
+        wait: yes
+        wait_timeout: 300
+        instance_tags:
+          Name: "app01"
+          Project: conduit
+          Owner: DevOps Team
+        exact_count: 1
+        count_tag:
+          Name: "app01"
+          Project: conduit
+          Owner: DevOps Team
+        group_id: "{{conduitStackSG_out.group_id}}"
+        vpc_subnet_id: "{{privsub1id}}"
+      register: app01_out
+
+    - name: Creating postgresql db01
+      ec2:
+        key_name: conduitkey
+        region: "{{region}}"
+        instance_type: t2.micro
+        image: "{{postgresql_ami}}"
+        wait: yes
+        wait_timeout: 300
+        instance_tags:
+          Name: "db01"
+          Project: conduit
+          Owner: DevOps Team
+        exact_count: 1
+        count_tag:
+          Name: "db01"
+          Project: conduit
+          Owner: DevOps Team
+        group_id: "{{conduitStackSG_out.group_id}}"
+        vpc_subnet_id: "{{privsub1id}}"
+      register: db01_out
+
+    - debug:
+        var: db01_out.tagged_instances[0].id
+
+    - local_action:
+        module: ec2_elb_lb
+        name: "conduit-elb"
+        region: "{{region}}"
+        state: present
+        instance_ids:
+          - "{{ web01_out.tagged_instances[0].id }}"
+        purge_instance_ids: true
+        security_group_ids: "{{ conduitELBSG_out.group_id }}"
+        subnets:
+          - "{{ pubsub1id }}"
+          - "{{ pubsub2id }}"
+          - "{{ pubsub3id }}"
+        listeners:
+          - protocol: http # options are http, https, ssl, tcp
+            load_balancer_port: 80
+            instance_port: 80
+
+    - name: Insert/Update Hosts IP & Name in file provision-stack/group_vars/hostsip
+      blockinfile:
+        path: provision-stack/group_vars/hostsip
+        block: |
+          web01_ip: {{ web01_out.tagged_instances[0].private_ip }}
+          app01_ip: {{ app01_out.tagged_instances[0].private_ip }}
+          db01_ip: {{ db01_out.tagged_instances[0].private_ip }}
+
+    - name: Copy login key to provision_stack directory
+      copy:
+        src: loginkey_conduit.pem
+        dest: provision-stack/loginkey_conduit.pem
+        mode: '0400'
+
+    - name: Insert/Update Inventory file provision-stack/inventory-conduit
+      blockinfile:
+        path: provision-stack/inventory-conduit
+        block: |
+          web01 ansible_host={{ web01_out.tagged_instances[0].private_ip }}
+          app01 ansible_host={{ app01_out.tagged_instances[0].private_ip }}
+          db01 ansible_host={{ db01_out.tagged_instances[0].private_ip }}
+          cntl ansible_host=127.0.0.1 ansible_connection=local
+
+          [websrvgrp]
+          web01
+
+          [appsrvgrp]
+          app01
+
+          [dbsrvgrp]
+          db01
+
+          [control]
+          cntl
+
+          [stack_inst:children]
+          websrvgrp
+          appsrvgrp
+          dbsrvgrp
+
+          [stack_inst:vars]
+          ansible_user=ubuntu
+          ansible_ssh_private_key_file=loginkey_conduit.pem
+          #ansible_python_interpreter=/usr/bin/python3
+
+

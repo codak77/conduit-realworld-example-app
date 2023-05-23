@@ -1,0 +1,3 @@
+nginx_ami: ami-053b0d53c279acc90
+express_ami: ami-053b0d53c279acc90
+postgresql_ami: ami-053b0d53c279acc90
